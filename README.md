@@ -1,1 +1,1 @@
-# TinyVPN
+# TinyVPNServer
