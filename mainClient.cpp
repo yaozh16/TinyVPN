@@ -5,14 +5,14 @@
 #include <iostream>
 #include "ClientBackend.h"
 ClientBackend* backend;
-void* disconnectError(void* s){
+void* onDisconnect(void *s){
     printf("disconnect:%d\n",*(int*)s);
     backend->disconnect();
 }
 int main() {
-    backend=new ClientBackend(disconnectError);
+    backend= new ClientBackend(onDisconnect);
     backend->reset();
-    if(0>backend->connect2Server("127.0.0.1","5678")){
+    if(0>backend->connect2Server("2402:f000:4:72:808::6b04","5678")){
         printf("error");
         exit(0);
     }

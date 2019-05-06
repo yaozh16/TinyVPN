@@ -7,8 +7,8 @@
 
 
 #define MSG_DATA_FIELD_MAX  4096
-#define TIME_STAMP_MAX_INTERVAL 10
-#define HEARTBEAT_SEND_INTERVAL 10
+#define TIME_STAMP_MAX_INTERVAL 60
+#define HEARTBEAT_SEND_INTERVAL 20
 
 struct Msg {
     int length;		    //整个结构体的字节长度

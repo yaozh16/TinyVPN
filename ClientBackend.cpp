@@ -171,7 +171,7 @@ int ClientBackend::connect2Server(const char *host, const char* service){
         printAddrInfo(res);
         v6fd = socket (res->ai_family, res->ai_socktype, res->ai_protocol);
         if (v6fd < 0) {
-            perror("v6fd<0\n ");
+            perror("v6fd<0");
             continue;
         }
         /*ignore this one */
@@ -244,9 +244,12 @@ int ClientBackend::stopLoop(){
 
 }
 ClientBackendStatistics ClientBackend::getStatistics(){
-
+    return statistics;
 }
 
+
+
+/* private functions*/
 void ClientBackend::notifyDisconnect(int arg){
     if(onDisconnect){
         onDisconnect(&arg);
@@ -262,7 +265,6 @@ void* ClientBackend::keepalive_loop(void* clientBackend){
     while(true){
         for(int i=0;i<HEARTBEAT_SEND_INTERVAL;i++){
             sleep(1);
-
         };
         if(time(NULL)-backend->server_timestamp>TIME_STAMP_MAX_INTERVAL){
             backend->notifyDisconnect(CLIENT_BACKEND_SERVER_FD_ERR);
