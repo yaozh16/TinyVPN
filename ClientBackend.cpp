@@ -100,6 +100,7 @@ static void printAddrInfo(addrinfo* aip){
             printf("\n");
     }
     printf("\n");
+    fflush_unlocked(stdout);
 }
 int Write(int fd,void* buff,int size){
     if(fd<0) return -1;
@@ -136,9 +137,9 @@ int ClientBackend::Write2Server(Msg* msg){
     return Write(v6fd,msg,msg->length);
 }
 
-ClientBackend::ClientBackend(void *(*onDisconnect) (void *)){
+ClientBackend::ClientBackend(DisconnectNotifier* notifier){
     reset();
-    this->onDisconnect=onDisconnect;
+    this->notifier=notifier;
 }
 
 void ClientBackend::reset(){
@@ -163,7 +164,7 @@ int ClientBackend::connect2Server(const char *host, const char* service){
     hints.ai_family = AF_UNSPEC;
     hints.ai_socktype = SOCK_STREAM;
     if ( (n = getaddrinfo (host,service, &hints, &res)) != 0) {
-        printf("tcp_connect error for %s, %s: %s", host, service, gai_strerror(n));
+        printf("getaddrinfo error for %s, %s: %s\n", host, service, gai_strerror(n));
         return -1;
     }
     ressave = res;
@@ -179,7 +180,9 @@ int ClientBackend::connect2Server(const char *host, const char* service){
             /* success */
             break;
         } else{
-            perror("connect failed\n");
+            perror("connect failed");
+            printAddrInfo(res);
+            exit(0);
         }
         close(v6fd);
         v6fd=-1;
@@ -187,7 +190,7 @@ int ClientBackend::connect2Server(const char *host, const char* service){
     } while ( (res = res->ai_next) != NULL);
     if (res == NULL) {
         /* errno set from final connect2Server() */
-        printf("tcp_connect error for %s, %s", host, service);
+        perror("tcp_connect error");
         return -1;
     }
     freeaddrinfo (ressave);
@@ -251,8 +254,8 @@ ClientBackendStatistics ClientBackend::getStatistics(){
 
 /* private functions*/
 void ClientBackend::notifyDisconnect(int arg){
-    if(onDisconnect){
-        onDisconnect(&arg);
+    if(notifier){
+        notifier->onDisconnect(&arg);
     }
 }
 

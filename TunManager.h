@@ -303,22 +303,23 @@ public:
             //data in
             //read from ievent fd
             if(event_Fd==manager->clientfd){
-                if(!manager->occupied || 0>manager->procCliMsg()){
+                int ret=0;
+                if(!manager->occupied || 0>(ret=manager->procCliMsg())){
                     del_event_epoll(epoll_Fd, event_Fd);
                     close(event_Fd);
                     free(data);
                     manager->occupied=false;
-                    printf("disconnected[%s]\n",inet_ntoa(manager->tunAddr));
+                    printf("disconnected[%s]%d\n",inet_ntoa(manager->tunAddr),ret);
                 }
-            }else if(event_Fd==manager->tunfd && manager->occupied){
-                manager->procTunMsg();
+            }else if(event_Fd==manager->tunfd){
+                manager->tryReadTunMsg();
             }
         }else if(pstEvent->events & EPOLLERR){
             del_event_epoll(epoll_Fd, event_Fd);
             close(event_Fd);
             free(data);
             manager->occupied=false;
-            printf("disconnected[%s]\n",inet_ntoa(manager->tunAddr));
+            printf("disconnected[%s] EPOLLERR\n",inet_ntoa(manager->tunAddr));
         }
         return 0;
     }
@@ -339,7 +340,7 @@ public:
                 makeSocketNonBlocking(manager->clientfd);
                 //设置超时时间
                 struct timeval timeout;
-                timeout.tv_sec = 5;
+                timeout.tv_sec = 100;
                 timeout.tv_usec = 0;
                 setsockopt(manager->clientfd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
                 add_event_epoll(recvEpollFd, manager->clientfd, proc_receive);
@@ -360,7 +361,7 @@ public:
 
 
 
-    static void proc_epoll(int epollFd, int timeout) {
+    static void process_wait_epoll(int epollFd, int timeout) {
         int n;
         int i;
 
@@ -387,74 +388,119 @@ private:
          *        IFF_TAP   - TAP device
          *        IFF_NO_PI - Do not provide packet information
          */
-        ifr.ifr_flags = IFF_TUN | IFF_NO_PI;
-        snprintf(ifr.ifr_name,IF_NAMESIZE,"TinyVpn%d",devIndex);
         if((tunfd= open("/dev/net/tun", O_RDWR)) < 0) {
             perror("Cannot open TUN dev");
-            return -1;
+            return tunfd;
         }
+        ifr.ifr_flags = IFF_TUN | IFF_NO_PI;
+        snprintf(ifr.ifr_name,IF_NAMESIZE,"TinyVpn%d",devIndex);
+
         if (ioctl(tunfd, TUNSETIFF, (void *)&ifr) < 0) {
             perror("Cannot initialize TUN device");
+            close(tunfd);
             return -1;
         }
+
         sprintf(buffer,"ip link set dev %s up", ifr.ifr_name);
+        system(buffer);
+        sprintf(buffer,"ip a add %s/8 dev %s", "10.0.0.1", ifr.ifr_name);
         system(buffer);
         sprintf(buffer,"ip link set dev %s mtu %u", ifr.ifr_name, 1500 - MSG_HEADER_SIZE);
         system(buffer);
-        sprintf(buffer,"ip a add %s/32 dev %s",inet_ntoa(virtualAddress), ifr.ifr_name);
-        system(buffer);
+        //sprintf(buffer,"route add %s dev %s",inet_ntoa(virtualAddress), ifr.ifr_name);
+        //system(buffer);
         return tunfd;
     }
-    int procTunMsg(){
-        uint32_t n=recv(tunfd,msg2cli.data,MSG_DATA_FIELD_MAX,0)+MSG_HEADER_SIZE;
+    int tryReadTunMsg(){
+        ssize_t n=read(tunfd,msg2cli.data,MSG_DATA_FIELD_MAX);
+        if(n<=0){
+            return n;
+        }
+        n+=MSG_HEADER_SIZE;
         iphdr *hdr = (struct iphdr *)msg2cli.data;
         if(hdr->version==4) {
-            printf("on tun data\n");
-            if (hdr->daddr == tunAddr.s_addr) {
+            printf("\033[1;32mtun\033[0m:%s",inet_ntoa(*(in_addr*)&(hdr->saddr)));
+            printf("->%s",inet_ntoa(*(in_addr*)&(hdr->daddr)));
+            printf("[%d][%d]\n",
+                   hdr->id,
+                   hdr->protocol);
+            if(hdr->protocol==1){
+                //ICMP
+                hdr->saddr=tunAddr.s_addr;
+                return write(tunfd,&msg2cli.data,n);
+            }
+            else if (hdr->daddr == tunAddr.s_addr && occupied) {
+                // ignore unrelated packets
                 msg2cli.type = TYPE_WORKING_REPLY;
                 msg2cli.length = n;
+
                 return write(clientfd, &msg2cli, msg2cli.length);
             }
-        } else{
-            //printf("ignore other version packet\n");
+        } else if(hdr->version!=6){
+            printf("ignore other version packet:%d\n",hdr->version);
         }
         return 0;
     }
     int procCliMsg(){
+        printf("try recv from clientfd");
         ssize_t n=recv(clientfd,&msg2tun,MSG_HEADER_SIZE,0);
-        if(n<=0){ return -1; }
+        printf(":%ld:",n);
+        size_t left;
+        if(n<=0){
+            return -1;
+        }
+
         timestamp_recv=time(NULL);
-        switch (msg2tun.type){
-            case TYPE_WORKING_REQUEST:
-                printf("send request\n");
-                n=recv(clientfd,msg2tun.data,MSG_DATA_SIZE(msg2tun),0);
-                if(n==msg2tun.length){
+        if (msg2tun.type==TYPE_WORKING_REQUEST){
+                printf("\033[1;33mrequest\033[0m %d:",msg2tun.length);
+                size_t left=msg2tun.length-MSG_HEADER_SIZE;
+                while(left>0){
+                    n=recv(clientfd,msg2tun.data+msg2tun.length-MSG_HEADER_SIZE-left,left,0);
+
+                    if(n==0){
+                        break;
+                    }
+                    if(n==-1){
+                        perror("read payload");
+                        usleep(100);
+                    } else{
+                        left-=n;
+                    }
+                }
+                if(left==0){
                     iphdr *hdr = (struct iphdr *)msg2tun.data;
+
                     if(hdr->version==4){
                         hdr->saddr=tunAddr.s_addr;
                     } else{
                         printf("cannot process other version packet\n");
                     }
-                    write(tunfd,msg2tun.data,MSG_DATA_SIZE(msg2tun));
-                    return 0;
+                    if(hdr->saddr==tunAddr.s_addr){
+                        printf("%s",inet_ntoa(*(in_addr*)&(hdr->saddr)));
+                        printf("->%s",inet_ntoa(*(in_addr*)&(hdr->daddr)));
+                        printf("[%d][%d]\n",
+                               hdr->id,
+                               hdr->protocol);
+                        write(tunfd,msg2tun.data,MSG_DATA_SIZE(msg2tun));
+                    }
                 } else{
+                    printf("TYPE_WORKING_REQUEST Error %ld/%d\n",n,MSG_DATA_SIZE(msg2tun));
+
                     return -1;
                 }
-                break;
-            case TYPE_HEARTBEAT:
-                printf("recv heartbeat\n");
-                return 0;
-            case TYPE_ADDRESS_REQUEST:
+        } else if(msg2tun.type==TYPE_HEARTBEAT) {
+            printf("recv heartbeat\n");
+            return 0;
+        } else if(msg2tun.type==TYPE_ADDRESS_REQUEST){
                 printf("request address\n");
                 msg2tun.type=TYPE_ADDRESS_REPLY;
-                snprintf(msg2tun.data,MSG_DATA_FIELD_MAX,"%s %s %s %s %s ",
-                         inet_ntoa(tunAddr),
-                         inet_ntoa(tunAddr),
-                         inet_ntoa(tunAddr),
-                         inet_ntoa(tunAddr),
+                snprintf(msg2tun.data,MSG_DATA_FIELD_MAX,"%s 0.0.0.0 202.38.120.242 8.8.8.8 202.106.0.20 ",
                          inet_ntoa(tunAddr));
+                printf("reply:[%s]\n",msg2tun.data);
                 msg2tun.length=strlen(msg2tun.data)+MSG_HEADER_SIZE;
                 return write(clientfd,&msg2tun,msg2tun.length);
+        } else{
+            printf("unknown type \033[1;35m%d\033[0m\n",msg2tun.type);
         }
         return 0;
     }
@@ -479,10 +525,19 @@ public:
         {
             if(!occupied)
                 /* 处理父epoll消息 */
-                proc_epoll(listenEpollFd, 5);
+                process_wait_epoll(listenEpollFd, 5);
             else {
-                /* 处理子epoll消息 */
-                proc_epoll(recvEpollFd, 5);
+                /* 处理子 epoll消息 */
+                process_wait_epoll(recvEpollFd, 1);
+            }
+            //tryReadTunMsg();
+            if(time(NULL)-timestamp_send>20 && occupied){
+                printf("send heartbeat %u\n",(unsigned int)timestamp_send);
+                timestamp_send=time(NULL);
+                Msg tmp;
+                tmp.type=TYPE_HEARTBEAT;
+                tmp.length=MSG_HEADER_SIZE;
+                write(clientfd,&tmp,tmp.length);
             }
             if(time(NULL)-timestamp_send>20 && occupied){
                 printf("send heartbeat %u\n",(unsigned int)timestamp_send);
@@ -491,6 +546,9 @@ public:
                 tmp.type=TYPE_HEARTBEAT;
                 tmp.length=MSG_HEADER_SIZE;
                 write(clientfd,&tmp,tmp.length);
+            }
+            if(((time(NULL)-timestamp_send) %8==0) && occupied){
+                //printf("idle\n");
             }
         }
     }
@@ -503,7 +561,7 @@ private:
         timestamp_send=time(NULL);
         tunAddr={0};
         inet_aton(addr,&tunAddr);
-        printf("[%d]take tun address as:%s\n",getpid(),addr);
+        printf("[%d:%d]take tun address as:%s\n",getpid(),index,addr);
         this->index=index;
         allocTun(this->index, this->tunAddr);
         recvEpollFd=epoll_create(EPOLL_EVENT_MAX);
@@ -512,7 +570,7 @@ private:
         }
 
         makeSocketNonBlocking(tunfd);
-        //add_event_epoll(recvEpollFd, tunfd, proc_receive);
+        add_event_epoll(recvEpollFd, tunfd, proc_receive);
     }
 };
 

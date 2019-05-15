@@ -40,6 +40,11 @@ struct ClientBackendStatistics{
     unsigned long bytesRecv;
     /*.....other statistics*/
 };
+class DisconnectNotifier{
+public:
+    virtual void onDisconnect(void*)=0;
+};
+
 class ClientBackend {
 public:
     /*构造参数: 连接断开时的回调函数
@@ -49,7 +54,7 @@ public:
      *          如果不做处理,一次连接中,onDisconnect可能会被调用多次(读失败和写失败均可能调用一次)
      *          但是可以在onDisconnect中调用ClientBackend的disconnect等函数
      * */
-    explicit ClientBackend(void *(*onDisconnect) (void *));
+    explicit ClientBackend(DisconnectNotifier* notifier);
     /* 全部初始化 */
     void reset();
     /* 返回值: >=0成功,<0失败 */
@@ -71,7 +76,7 @@ private:
     int vpnfd;
     int v6fd;
 
-    void *(*onDisconnect) (void *);
+    DisconnectNotifier* notifier;
 
     ClientBackendStatistics statistics;
     AllocatedAddress allocatedAddress;
