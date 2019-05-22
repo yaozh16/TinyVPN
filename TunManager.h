@@ -39,6 +39,7 @@
 #include "protocol.h"
 #include <linux/ip.h>
 #include <unistd.h>
+#include <netinet/tcp.h>
 #define LISTENER_MAX      5
 #define EPOLL_EVENT_MAX  100
 #define EVENT_LIST_MAX   100
@@ -53,6 +54,26 @@ typedef struct EPOLL_DATA_S
     int event_Fd;
     PFCALLBACL pfCallBack;
 }Epoll_Data_S;
+
+
+static int RecvN(int fd,char* buff,int n){
+    int left=n;
+    while(left>0) {
+        ssize_t recvn = read(fd, buff + n - left, left);
+        if (recvn == -1) {
+            usleep(100);
+            continue;
+        } else if (recvn == 0){
+            return 0;
+        }else if(recvn>0){
+            left-=recvn;
+        }else{
+            perror("Recv error");
+            return -1;
+        }
+    }
+    return n;
+}
 
 
 
@@ -343,6 +364,8 @@ public:
                 timeout.tv_sec = 100;
                 timeout.tv_usec = 0;
                 setsockopt(manager->clientfd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+                int enable=1;
+                setsockopt(manager->clientfd,SOL_TCP,TCP_NODELAY,&enable,sizeof(enable));
                 add_event_epoll(recvEpollFd, manager->clientfd, proc_receive);
                 manager->occupied= true;
                 manager->timestamp_send=manager->timestamp_send=time(NULL);
@@ -403,7 +426,7 @@ private:
 
         sprintf(buffer,"ip link set dev %s up", ifr.ifr_name);
         system(buffer);
-        sprintf(buffer,"ip a add %s/8 dev %s", "10.0.0.1", ifr.ifr_name);
+        sprintf(buffer,"ip a add 10.0.%d.1/24 dev %s", index, ifr.ifr_name);
         system(buffer);
         sprintf(buffer,"ip link set dev %s mtu %u", ifr.ifr_name, 1500 - MSG_HEADER_SIZE);
         system(buffer);
@@ -430,9 +453,11 @@ private:
                 return write(tunfd,&msg2cli.data,n);
             }
             else if (hdr->daddr == tunAddr.s_addr && occupied) {
+
                 // ignore unrelated packets
                 msg2cli.type = TYPE_WORKING_REPLY;
                 msg2cli.length = n;
+
 
                 return write(clientfd, &msg2cli, msg2cli.length);
             }
@@ -443,62 +468,47 @@ private:
     }
     int procCliMsg(){
         printf("try recv from clientfd");
-        ssize_t n=recv(clientfd,&msg2tun,MSG_HEADER_SIZE,0);
-        printf(":%ld:",n);
-        size_t left;
+       int n=RecvN(clientfd,(char*)&msg2tun,MSG_HEADER_SIZE);
+        printf(":%d:",n);
         if(n<=0){
             return -1;
         }
 
         timestamp_recv=time(NULL);
         if (msg2tun.type==TYPE_WORKING_REQUEST){
-                printf("\033[1;33mrequest\033[0m %d:",msg2tun.length);
-                size_t left=msg2tun.length-MSG_HEADER_SIZE;
-                while(left>0){
-                    n=recv(clientfd,msg2tun.data+msg2tun.length-MSG_HEADER_SIZE-left,left,0);
+            printf("\033[1;33mrequest\033[0m %d:",msg2tun.length);
+            n=RecvN(clientfd,msg2tun.data,msg2tun.length-MSG_HEADER_SIZE);
+            if(n==msg2tun.length-MSG_HEADER_SIZE){
+                iphdr *hdr = (struct iphdr *)msg2tun.data;
 
-                    if(n==0){
-                        break;
-                    }
-                    if(n==-1){
-                        perror("read payload");
-                        usleep(100);
-                    } else{
-                        left-=n;
-                    }
-                }
-                if(left==0){
-                    iphdr *hdr = (struct iphdr *)msg2tun.data;
-
-                    if(hdr->version==4){
-                        hdr->saddr=tunAddr.s_addr;
-                    } else{
-                        printf("cannot process other version packet\n");
-                    }
-                    if(hdr->saddr==tunAddr.s_addr){
-                        printf("%s",inet_ntoa(*(in_addr*)&(hdr->saddr)));
-                        printf("->%s",inet_ntoa(*(in_addr*)&(hdr->daddr)));
-                        printf("[%d][%d]\n",
-                               hdr->id,
-                               hdr->protocol);
-                        write(tunfd,msg2tun.data,MSG_DATA_SIZE(msg2tun));
-                    }
+                if(hdr->version==4){
+                    hdr->saddr=tunAddr.s_addr;
                 } else{
-                    printf("TYPE_WORKING_REQUEST Error %ld/%d\n",n,MSG_DATA_SIZE(msg2tun));
-
-                    return -1;
+                    printf("cannot process other version packet\n");
                 }
+                if(hdr->saddr==tunAddr.s_addr){
+                    printf("%s",inet_ntoa(*(in_addr*)&(hdr->saddr)));
+                    printf("->%s",inet_ntoa(*(in_addr*)&(hdr->daddr)));
+                    printf("[%d][%d]\n",
+                           hdr->id,
+                           hdr->protocol);
+                    write(tunfd,msg2tun.data,MSG_DATA_SIZE(msg2tun));
+                }
+            } else{
+                printf("TYPE_WORKING_REQUEST Error %d/%d\n",n,MSG_DATA_SIZE(msg2tun));
+                return -1;
+            }
         } else if(msg2tun.type==TYPE_HEARTBEAT) {
             printf("recv heartbeat\n");
             return 0;
         } else if(msg2tun.type==TYPE_ADDRESS_REQUEST){
-                printf("request address\n");
-                msg2tun.type=TYPE_ADDRESS_REPLY;
-                snprintf(msg2tun.data,MSG_DATA_FIELD_MAX,"%s 0.0.0.0 202.38.120.242 8.8.8.8 202.106.0.20 ",
-                         inet_ntoa(tunAddr));
-                printf("reply:[%s]\n",msg2tun.data);
-                msg2tun.length=strlen(msg2tun.data)+MSG_HEADER_SIZE;
-                return write(clientfd,&msg2tun,msg2tun.length);
+            printf("request address\n");
+            msg2tun.type=TYPE_ADDRESS_REPLY;
+            snprintf(msg2tun.data,MSG_DATA_FIELD_MAX,"%s 0.0.0.0 202.38.120.242 8.8.8.8 202.106.0.20 ",
+                     inet_ntoa(tunAddr));
+            printf("reply:[%s]\n",msg2tun.data);
+            msg2tun.length=strlen(msg2tun.data)+MSG_HEADER_SIZE;
+            return write(clientfd,&msg2tun,msg2tun.length);
         } else{
             printf("unknown type \033[1;35m%d\033[0m\n",msg2tun.type);
         }
@@ -539,17 +549,7 @@ public:
                 tmp.length=MSG_HEADER_SIZE;
                 write(clientfd,&tmp,tmp.length);
             }
-            if(time(NULL)-timestamp_send>20 && occupied){
-                printf("send heartbeat %u\n",(unsigned int)timestamp_send);
-                timestamp_send=time(NULL);
-                Msg tmp;
-                tmp.type=TYPE_HEARTBEAT;
-                tmp.length=MSG_HEADER_SIZE;
-                write(clientfd,&tmp,tmp.length);
-            }
-            if(((time(NULL)-timestamp_send) %8==0) && occupied){
-                //printf("idle\n");
-            }
+
         }
     }
 private:
